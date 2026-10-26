@@ -1,0 +1,5 @@
+# Extra dependency for building the distributable .app / .dmg.
+#   ./.venv/bin/pip install -r requirements-build.txt
+#   ./build_macos.sh
+-r requirements.txt
+pyinstaller==6.11.1

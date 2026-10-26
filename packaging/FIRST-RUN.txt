@@ -1,0 +1,44 @@
+Audio Transcription & Annotation
+================================
+
+1. Drag AudioTranscribe.app into the Applications folder.
+
+2. The app is not signed with an Apple Developer certificate, so the first
+   launch is blocked by Gatekeeper. Right-click the app and choose "Open",
+   then confirm. You only do this once.
+
+   If macOS says the app "is damaged", run this in Terminal once:
+       xattr -cr /Applications/AudioTranscribe.app
+
+3. Double-click it. The app opens in its own window. Nothing else to set up.
+   Closing the window quits the app, and stops any transcription with it.
+
+4. The first transcription downloads the speech model (about 1.5 GB), so it
+   is slower than the ones after it. Later runs need no internet at all.
+
+
+IT WORKS OUT OF THE BOX. OLLAMA IS OPTIONAL.
+--------------------------------------------
+With nothing else installed, the app runs in Fast mode and gives you
+timestamps, speaker labels, pauses, silences, interrupts, and the PII,
+DATE and TIME tags. It tells you this on the page.
+
+Installing Ollama adds the full annotation pass - the Clean line,
+<fs>/<sc> false starts and self-corrections, and <LOCATION>:
+
+    install from https://ollama.com/download
+    then, in Terminal:   ollama pull qwen2.5:7b
+
+Reload the page afterwards and the Fast mode tick becomes optional.
+
+
+REQUIREMENTS
+------------
+Apple Silicon Mac (M1 or newer), macOS 13 or later, 16 GB RAM recommended.
+Intel Macs are not supported - the speech model runs on Apple's MLX
+framework, which needs Apple Silicon.
+
+
+Transcripts are saved to:
+    ~/Library/Application Support/AudioTranscribe/out/<file name>/
+and can be downloaded from the app window as well.

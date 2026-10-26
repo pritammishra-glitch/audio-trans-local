@@ -1,0 +1,17 @@
+# Virtualenv and build artefacts
+.venv/
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec.bak
+
+# Recordings and their transcripts never go in the repo. Real call audio is
+# personal data - the ENT call used while building this is a patient
+# conversation - and the transcripts carry names, phone numbers and OTPs.
+# src/make_test_call.py regenerates the synthetic test calls on demand.
+audio/
+out/
+
+# macOS
+.DS_Store

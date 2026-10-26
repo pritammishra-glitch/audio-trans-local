@@ -1,0 +1,51 @@
+Audio Transcription & Annotation - Windows
+==========================================
+
+1. Keep this whole folder together. AudioTranscribe.exe needs the files
+   beside it; moving the .exe on its own will not work.
+
+2. Double-click AudioTranscribe.exe. A console window opens and a browser
+   tab follows at http://127.0.0.1:5001. Closing the console stops the app.
+
+3. Windows SmartScreen will warn that the publisher is unknown, because the
+   app is not code-signed. Click "More info" then "Run anyway". Once only.
+
+4. The first transcription downloads the speech model (about 1.5 GB) and is
+   therefore slower than the ones after it.
+
+
+FAST MODE WORKS ON ITS OWN. FULL MODE NEEDS OLLAMA.
+---------------------------------------------------
+Tick "Fast mode" and the app is self-contained: timestamps, speakers,
+pauses, silences and the PII, DATE and TIME tags.
+
+For the Clean line, <fs>/<sc> and <LOCATION> you also need Ollama:
+
+    install from https://ollama.com/download
+    then, in a terminal:   ollama pull qwen2.5:7b
+
+Without Ollama, leave Fast mode ticked.
+
+
+MP3 AND M4A NEED FFMPEG
+-----------------------
+.wav and .flac files are read directly. For compressed audio, install
+ffmpeg and make sure it is on PATH:
+
+    winget install Gyan.FFmpeg
+
+
+SPEED
+-----
+This build runs the speech model on the CPU, so expect roughly real time -
+a 10 minute call takes about 10 minutes. With an NVIDIA GPU you can set
+these before launching for a large speed-up:
+
+    set ASR_DEVICE=cuda
+    set ASR_COMPUTE=float16
+
+
+Results are saved in:
+    %LOCALAPPDATA%\AudioTranscribe\out\<file name>\
+
+Paste that path into Explorer's address bar to open it.
