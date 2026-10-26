@@ -89,11 +89,22 @@ def _spawn(cmd, env, log):
                             stderr=subprocess.STDOUT, text=True, bufsize=1)
     with _children_lock:
         _children.add(proc)
+    said_downloading = False
     try:
         for line in proc.stdout:
             line = line.rstrip()
-            if line and "Fetching" not in line and "warn" not in line.lower():
-                log(line)
+            if not line or "warn" in line.lower():
+                continue
+            # huggingface_hub's progress bars are unreadable once they reach a
+            # log, but silently swallowing them made the first run look frozen
+            # for several minutes. One honest line instead.
+            if "Fetching" in line or "%|" in line:
+                if not said_downloading:
+                    log("downloading the speech model - about 1.5 GB, once "
+                        "only. Later runs need no internet.")
+                    said_downloading = True
+                continue
+            log(line)
         proc.wait()
     finally:
         with _children_lock:

@@ -120,6 +120,24 @@ def language_probs(audio):
     return dict(all_probs)
 
 
+def model_cached():
+    """Has the speech model already been downloaded?
+
+    The weights are about 1.5 GB and are fetched on first use, so the app can
+    say whether it is ready to work offline or still has a download ahead of
+    it.
+    """
+    import pathlib
+    home = os.environ.get("HF_HOME") or (pathlib.Path.home() / ".cache/huggingface")
+    hub = pathlib.Path(home) / "hub"
+    if not hub.is_dir():
+        return False
+    for d in hub.glob("models--*whisper-large-v3-turbo*"):
+        if any((d / "snapshots").glob("*/*")):
+            return True
+    return False
+
+
 def warm():
     """Load the model now rather than on first use."""
     _fw_model() if backend() == "faster-whisper" else _mlx_model()

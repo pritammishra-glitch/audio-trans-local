@@ -10,6 +10,7 @@ from flask import (Flask, request, send_file, redirect, url_for,
                    render_template_string, abort)
 
 import pipeline
+import asr_backend
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 DATA = pipeline.data_root()
@@ -55,7 +56,7 @@ def run_job(job_id, audio_path, name, language, second, fast):
 
     def emit(line):
         line = str(line).rstrip()
-        if not line or "Fetching" in line or "NotOpenSSL" in line:
+        if not line or "NotOpenSSL" in line:
             return
         log.append(line)
         set_state(log=log[-40:])
@@ -97,11 +98,39 @@ PAGE = """<!doctype html>
  .note{border:1px solid var(--line);border-left:3px solid var(--acc);
    border-radius:8px;padding:12px 14px;margin:0 0 1.25rem;font-size:.93rem}
  code{background:rgba(127,127,127,.14);padding:1px 5px;border-radius:4px}
+ .status{border:1px solid var(--line);border-radius:10px;padding:12px 14px;
+   margin:0 0 1.25rem;font-size:.92rem;display:grid;gap:.45rem}
+ .dot{display:inline-block;width:8px;height:8px;border-radius:50%;
+   margin-right:8px;vertical-align:middle}
+ .dot.ok{background:#2e9e6b} .dot.wait{background:#d79a21}
+ .dot.off{background:#9a9a94}
  ul.files{list-style:none;padding:0;margin:0} ul.files li{margin:.3rem 0}
 </style>
 <div class="wrap">
 <h1>Audio transcription &amp; annotation</h1>
 <p class="sub">Runs entirely on this machine. Nothing is uploaded anywhere.</p>
+
+{% if not job %}
+<div class="status">
+  <div><span class="dot ok"></span><strong>App</strong> &mdash; installed and running</div>
+  <div>
+    {% if model_ready %}
+      <span class="dot ok"></span><strong>Speech model</strong> &mdash; downloaded, works offline
+    {% else %}
+      <span class="dot wait"></span><strong>Speech model</strong> &mdash; not downloaded yet.
+      About 1.5 GB, fetched automatically the first time you transcribe
+      something. Needs internet once.
+    {% endif %}
+  </div>
+  <div>
+    {% if ollama %}
+      <span class="dot ok"></span><strong>Annotation model</strong> &mdash; Ollama running, full mode available
+    {% else %}
+      <span class="dot off"></span><strong>Annotation model</strong> &mdash; not installed, Fast mode only
+    {% endif %}
+  </div>
+</div>
+{% endif %}
 
 {% if not job and not ollama %}
 <div class="note">
@@ -206,7 +235,8 @@ PAGE = """<!doctype html>
 
 @app.get("/")
 def index():
-    return render_template_string(PAGE, job=None, ollama=ollama_up())
+    return render_template_string(PAGE, job=None, ollama=ollama_up(),
+                                  model_ready=asr_backend.model_cached())
 
 
 @app.post("/upload")
@@ -254,7 +284,8 @@ def status(job_id):
     if job["state"] == "done":
         preview = (OUT / job["name"] / "transcript.txt").read_text()[:4000]
     return render_template_string(PAGE, job=job, preview=preview,
-                                  ollama=ollama_up())
+                                  ollama=ollama_up(),
+                                  model_ready=asr_backend.model_cached())
 
 
 @app.get("/job/<job_id>/download/<which>")
