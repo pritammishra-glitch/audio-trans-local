@@ -7,6 +7,11 @@ datas, binaries, hiddenimports = [], [], []
 # bank and tokenizer files as package data; neither is found by static
 # analysis, so both are collected wholesale.
 # webview carries the Cocoa backend and its JS bridge as package data.
+# speechbrain/torch are deliberately NOT bundled. They carry the ECAPA
+# speaker embeddings that make mono diarization good, but PyInstaller cannot
+# scan speechbrain's module tree without crashing, and they would add some
+# 350 MB. The app therefore uses the MFCC fingerprint on mono files and says
+# so on a !! line; run from source with speechbrain installed to get ECAPA.
 for pkg in ("mlx", "mlx_whisper", "numba", "llvmlite", "tiktoken", "soundfile",
             "webview"):
     d, b, h = collect_all(pkg)
@@ -37,7 +42,8 @@ a = Analysis(
     hiddenimports=hiddenimports,
     # torch is a declared dependency of mlx-whisper but only its checkpoint
     # converter uses it. Dropping it takes 339 MB off the bundle.
-    excludes=["torch", "torchaudio", "torchvision", "matplotlib", "tkinter",
+    excludes=["torch", "torchaudio", "torchvision", "speechbrain",
+              "matplotlib", "tkinter",
               "PIL", "pandas", "IPython", "pytest", "transformers",
               # the other backend; this build uses mlx
               "faster_whisper", "ctranslate2"],

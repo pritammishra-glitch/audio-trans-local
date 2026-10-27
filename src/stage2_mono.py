@@ -25,6 +25,11 @@ N_MEL, N_MFCC = 26, 13
 SEG_GAP = 0.25
 MAX_SEG = 6.0
 MIN_SEG = 0.30      # shorter than this is too thin to fingerprint
+# An embedding from under a second of speech is unreliable, so the clusters
+# are formed from the long segments only and the short ones are then assigned
+# to whichever of the two they sit closer to. Clustering on everything let
+# short, badly-embedded segments drag the cluster centres around.
+CLUSTER_MIN = 0.80
 
 # Consecutive same-speaker segments rejoin across a gap up to MERGE_GAP, so a
 # turn can still contain a [pause]. At 2.0 s this was swallowing short replies
@@ -111,6 +116,43 @@ def segments_from_words(words):
     return segs
 
 
+_ecapa = None
+
+
+def ecapa():
+    """ECAPA speaker embeddings, if SpeechBrain is installed.
+
+    MFCC averages describe how a stretch of audio *sounds*; ECAPA embeddings
+    are trained to describe *who is speaking* and nothing else, which is the
+    whole problem here. Optional, because the packaged app does not ship
+    torch - without it the MFCC fingerprint below is used instead.
+    """
+    global _ecapa
+    if _ecapa is None:
+        try:
+            from speechbrain.inference import EncoderClassifier
+            _ecapa = EncoderClassifier.from_hparams(
+                source="speechbrain/spkrec-ecapa-voxceleb",
+                savedir=str(pathlib.Path.home() / ".cache/ecapa"),
+                run_opts={"device": "cpu"})
+        except Exception:
+            _ecapa = False
+    return _ecapa or None
+
+
+def embed(audio, sr, seg):
+    model = ecapa()
+    if model is None:
+        return None
+    import torch
+    x = audio[int(seg["start"] * sr): int(seg["end"] * sr)]
+    if len(x) < int(0.4 * sr):
+        return None
+    with torch.no_grad():
+        v = model.encode_batch(torch.tensor(x).unsqueeze(0))
+    return v.squeeze().cpu().numpy().astype(np.float64)
+
+
 def describe(audio, sr, seg):
     """A speaker fingerprint for one segment.
 
@@ -137,10 +179,14 @@ if __name__ == "__main__":
     audio, sr = sf.read(wd / "mono16k.wav", dtype="float32")
 
     segs = [s for s in segments_from_words(words) if s["end"] - s["start"] >= MIN_SEG]
+    using = "ecapa" if ecapa() is not None else "mfcc"
     feats, kept = [], []
     for s in segs:
-        v = describe(audio, sr, s)
-        if v is not None and np.isfinite(v).all():
+        v = embed(audio, sr, s) if using == "ecapa" else None
+        if v is None:
+            v = describe(audio, sr, s)
+        if v is not None and np.isfinite(v).all() and len(v) == len(
+                feats[0] if feats else v):
             feats.append(v)
             kept.append(s)
 
@@ -155,12 +201,26 @@ if __name__ == "__main__":
 
     X = np.vstack(feats)
     X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9)
+    X = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-9)
+
+    long_ix = [i for i, sg in enumerate(kept)
+               if sg["end"] - sg["start"] >= CLUSTER_MIN]
+    if len(long_ix) < 2:
+        long_ix = list(range(len(kept)))
+
     # Agglomerative clustering on cosine distance, which is what diarization
     # systems use: k-means assumes two equal round clusters, and on a call
     # where one person talks twice as much as the other that assumption is
     # wrong - it splits the talkative speaker in half.
-    link = linkage(pdist(X, metric="cosine"), method="average")
-    label = fcluster(link, t=2, criterion="maxclust") - 1
+    link = linkage(pdist(X[long_ix], metric="cosine"), method="average")
+    core = fcluster(link, t=2, criterion="maxclust") - 1
+
+    centres = np.vstack([X[[long_ix[i] for i, c in enumerate(core) if c == k]].mean(axis=0)
+                         for k in (0, 1)])
+    centres = centres / (np.linalg.norm(centres, axis=1, keepdims=True) + 1e-9)
+    label = (X @ centres.T).argmax(axis=1)
+    for i, c in zip(long_ix, core):
+        label[i] = c
 
     # Whoever speaks first is usually the agent on an inbound call. This is the
     # guide's heuristic and the reviewer is told to check it.
@@ -194,6 +254,11 @@ if __name__ == "__main__":
     sizes = {r: sum(1 for l in label if role[l] == r) for r in ("AGENT", "CUSTOMER")}
     flags = ["FLAG: mono recording - speaker labels come from clustering, not "
              "channels. Check who is AGENT and who is CUSTOMER."]
+    if using != "ecapa":
+        flags.append("FLAG: speaker separation used the MFCC fallback, which "
+                     "mixes speakers up more than the ECAPA embeddings. "
+                     "Install speechbrain and run from source for the better "
+                     "one.")
     if min(sizes.values()) < 0.1 * len(label):
         flags.append("FLAG: one speaker holds under 10% of segments - the split "
                      "may be wrong, or there may be only one speaker")
@@ -204,9 +269,8 @@ if __name__ == "__main__":
                      f"check each one")
 
     json.dump({"turns": turns, "overlaps": overlaps, "flags": flags,
-               "method": "cmvn-mfcc+delta+f0, agglomerative cosine "
-                         "(pyannote not installed)"},
+               "method": f"{using} embeddings, agglomerative cosine"},
               open(wd / "speakers.json", "w"), indent=2)
-    print(f"stage2-mono: {len(turns)} turns from {len(kept)} segments, "
+    print(f"stage2-mono[{using}]: {len(turns)} turns from {len(kept)} segments, "
           f"AGENT {sizes['AGENT']} / CUSTOMER {sizes['CUSTOMER']}, "
           f"{len(overlaps)} interrupt candidates")

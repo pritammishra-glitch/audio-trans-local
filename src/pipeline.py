@@ -112,11 +112,16 @@ def _spawn(cmd, env, log):
     return _Done(proc.returncode)
 
 
-def run(audio_path, workdir, language="auto", second="", fast=False, log=print):
+def run(audio_path, workdir, language="auto", second="", fast=False,
+        hotwords="", log=print):
     """Run every stage in order. Yields nothing; reports through `log`."""
     workdir = pathlib.Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, OLLAMA_KEEP_ALIVE="0")
+    if hotwords:
+        # Names, drugs and jargon whisper mishears on a phone line. Seeded as
+        # a decoding hint, which measurably helps exactly those words.
+        env["ASR_HOTWORDS"] = hotwords
 
     for label, module, kind in STAGES:
         if kind == "prep":
@@ -135,9 +140,15 @@ def run(audio_path, workdir, language="auto", second="", fast=False, log=print):
 
         if proc.returncode != 0:
             if kind == "mono_fallback":
-                # stereo split unavailable: this is a mono recording
-                log("== speaker separation (mono fallback)")
-                alt = _spawn(stage_cmd("stage2_mono", str(workdir)), env, log)
+                # Mono recording. pyannote is the better diarizer but needs a
+                # Hugging Face token and the package; the clustering fallback
+                # needs neither, so try the good one and drop through.
+                log("== speaker separation (mono)")
+                alt = _spawn(stage_cmd("stage2_pyannote", str(workdir)),
+                             env, log)
+                if alt.returncode != 0:
+                    alt = _spawn(stage_cmd("stage2_mono", str(workdir)),
+                                 env, log)
                 if alt.returncode != 0:
                     raise RuntimeError(f"{label} failed")
                 continue

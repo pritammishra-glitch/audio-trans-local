@@ -10,6 +10,8 @@ if [ -z "$F" ]; then echo "usage: ./run.sh audio/call.wav [lang] [second-lang]";
 LANG_ARG="${2:-auto}"
 SECOND_LANG="${3:-}"   # optional: the other language spoken on the call
 FAST_FLAG=""           # FAST=1 ./run.sh ... skips the LLM annotation pass
+# ASR_HOTWORDS="CT PNS, sinus, ENT" ./run.sh ...  seeds domain vocabulary
+# OLLAMA_MODEL=qwen2.5:14b ./run.sh ...           a stronger annotation model
 [ "${FAST:-}" = "1" ] && FAST_FLAG="--fast"
 NAME=$(basename "${F%.*}")
 WD="out/$NAME"
@@ -21,7 +23,8 @@ export OLLAMA_KEEP_ALIVE=0
 echo "== stage 0  prepare audio"           && $PY src/stage0_prep.py "$F" "$WD"
 
 echo "== stage 1  transcription"          && $PY src/stage1_asr.py          "$WD" "$LANG_ARG"
-echo "== stage 2  speaker separation"     && { $PY src/stage2_speakers.py "$WD" || $PY src/stage2_mono.py "$WD"; }
+echo "== stage 2  speaker separation"     && { $PY src/stage2_speakers.py "$WD" \
+    || $PY src/stage2_pyannote.py "$WD" || $PY src/stage2_mono.py "$WD"; }
 echo "== stage 3  pauses and silences"    && $PY src/stage3_acoustics.py    "$WD"
 echo "== stage 4  environment events"     && $PY src/stage4_events.py       "$WD"
 echo "== stage 5  speaker metadata"       && $PY src/stage5_speaker_meta.py "$WD"

@@ -13,7 +13,10 @@ import json, os, sys, pathlib, re, requests
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from entities import tag_entities
 
-MODEL = "qwen2.5:7b"
+# qwen2.5:14b handles the self-correction and false-start rules noticeably
+# better than 7b and still fits 16 GB, since this stage runs with nothing
+# else resident. Pull it and set OLLAMA_MODEL=qwen2.5:14b to use it.
+MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
 URL = "http://localhost:11434/api/chat"
 
 SYSTEM = """You annotate call transcripts. Apply these rules exactly.
@@ -148,6 +151,40 @@ def _mark_free(text):
         out.append(tok)
         i += 1
     return lead + " ".join(out) + trail
+
+
+# Self-corrections, but only the kind that cannot be misread. "no" and
+# "sorry" are everywhere in an unhappy call ("No sir, we don't have ties"),
+# so a signal word alone proves nothing. What does is a value replaced by
+# another of the same kind: a number for a number, a weekday for a weekday.
+# Everything subtler is left to the model.
+_NUM = (r"(?:\d+(?:st|nd|rd|th)?|one|two|three|four|five|six|seven|eight|"
+        r"nine|ten|eleven|twelve|twenty|thirty|forty|fifty)")
+_DAY = (r"(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+        r"today|tomorrow)")
+_SIGNAL = r"(?:no\s+sorry|no|sorry|i\s+mean|actually|wait|make\s+that|nahi\s+nahi)"
+
+SELF_CORRECTION = [
+    re.compile(rf"\b({_NUM})\b([,.]?\s+{_SIGNAL}[,.]?\s+(?:the\s+)?{_NUM}\b)", re.I),
+    re.compile(rf"\b({_DAY})\b([,.]?\s+{_SIGNAL}[,.]?\s+(?:the\s+)?{_DAY}\b)", re.I),
+]
+
+
+def mark_self_corrections(text):
+    """Wrap a replaced value in <sc>, where the replacement is unambiguous."""
+    if not text or "<sc>" in text:
+        return text
+    out, last = "", 0
+    for m in _SPAN.finditer(text):
+        out += _mark_sc_free(text[last:m.start()]) + m.group(0)
+        last = m.end()
+    return out + _mark_sc_free(text[last:])
+
+
+def _mark_sc_free(text):
+    for pat in SELF_CORRECTION:
+        text = pat.sub(lambda m: f"<sc>{m.group(1)}</sc>{m.group(2)}", text)
+    return text
 
 
 FILLER = re.compile(r"\b(um|uh|hmm|ah|er)\b", re.I)
@@ -413,7 +450,9 @@ if __name__ == "__main__":
             continue
 
         if fast:
-            text, added = regex_pii(mark_false_starts(t["text"]), history[-300:])
+            text, added = regex_pii(
+                mark_self_corrections(mark_false_starts(t["text"])),
+                history[-300:])
             text, _ = tag_entities(text)
             if t.get("interrupt"):
                 text = "[interrupt] " + text
@@ -497,7 +536,8 @@ if __name__ == "__main__":
         ctx = history[-300:]
         a["as_spoken"], added = regex_pii(str(a["as_spoken"]), ctx)
         a["clean"], added2 = regex_pii(str(a["clean"]), ctx)
-        a["as_spoken"] = mark_false_starts(str(a["as_spoken"]))
+        a["as_spoken"] = mark_self_corrections(
+            mark_false_starts(str(a["as_spoken"])))
         for place in find_locations(a["as_spoken"]):
             a["as_spoken"], _ = _wrap(a["as_spoken"], place, "LOCATION")
             a["clean"], _ = _wrap(a["clean"], place, "LOCATION")

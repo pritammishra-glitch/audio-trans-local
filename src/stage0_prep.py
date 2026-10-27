@@ -58,12 +58,26 @@ if __name__ == "__main__":
 
     sf.write(wd / "original.wav", audio, sr, subtype="PCM_16")
 
+    # Narrowband telephone audio arrives quiet and with rumble below the
+    # voice band, which is where whisper struggles most. Cleaning it up helps
+    # the decode; it is applied only to the 16 kHz copies whisper reads, so
+    # the measurements stages 3 to 5 take from original.wav are untouched.
+    narrowband = sr <= 8000
+
     def to_16k(x):
+        if narrowband:
+            # telephone speech starts around 300 Hz; below 70 Hz is rumble
+            sos = signal.butter(4, 70, btype="highpass", fs=sr, output="sos")
+            x = signal.sosfiltfilt(sos, x)
         if sr != TARGET_SR:
             g = np.gcd(int(sr), TARGET_SR)
             x = signal.resample_poly(x, TARGET_SR // g, int(sr) // g)
         peak = float(np.abs(x).max()) or 1.0
-        return (x / peak if peak > 1.0 else x).astype(np.float32)
+        if narrowband and 0 < peak < 0.95:
+            x = x * (0.95 / peak)      # lift a quiet line to a usable level
+        elif peak > 1.0:
+            x = x / peak
+        return np.clip(x, -1.0, 1.0).astype(np.float32)
 
     sf.write(wd / "mono16k.wav", to_16k(audio.mean(axis=1)), TARGET_SR, subtype="PCM_16")
 
@@ -78,4 +92,6 @@ if __name__ == "__main__":
         extra = " + ch0/ch1_16k.wav"
 
     print(f"stage0: {audio.shape[1]} ch @ {sr} Hz, {len(audio)/sr:.1f}s "
-          f"-> original.wav + mono16k.wav{extra}")
+          f"-> original.wav + mono16k.wav{extra}"
+          + (" (narrowband: high-passed and normalised for the decoder)"
+             if narrowband else ""))
