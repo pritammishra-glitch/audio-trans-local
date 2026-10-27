@@ -48,8 +48,26 @@ Then start it and pull the annotation model (about 4.7 GB):
 
 ```bash
 ollama serve &
-ollama pull qwen2.5:7b
+ollama pull qwen2.5:14b-instruct-q4_K_M   # or qwen2.5:7b for half the time
 ```
+
+The annotation model is picked automatically from what is installed, best
+first. Measured on five real turns, same prompt, same machine:
+
+| Model | Speed | Verbatim + clean | `<fs>`/`<sc>` found |
+|---|---|---|---|
+| qwen2.5:14b | 6.2 s/turn | 5/5 | 3 of 3 |
+| qwen2.5:7b | 3.0 s/turn | 4/5 | 1 of 3 |
+| qwen3:8b | 30.8 s/turn | 5/5 | 3 of 3 |
+
+qwen3 is a reasoning model and spends ten times as long to reach the same
+answer, so it is not used. `OLLAMA_MODEL` overrides the choice.
+
+Turns are annotated eight at a time rather than one by one, which stopped the
+900-token rulebook being re-read for every turn: on a nine-minute call that
+took the annotation pass from about 25 minutes to 11. `ANNOTATE_BATCH=1`
+restores one-at-a-time if a batch ever misbehaves - any batch that comes back
+the wrong shape already falls back by itself.
 
 **3. The Python environment**, from inside the project folder:
 

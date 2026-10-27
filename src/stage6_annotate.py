@@ -13,10 +13,42 @@ import json, os, sys, pathlib, re, requests
 sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from entities import tag_entities
 
-# qwen2.5:14b handles the self-correction and false-start rules noticeably
-# better than 7b and still fits 16 GB, since this stage runs with nothing
-# else resident. Pull it and set OLLAMA_MODEL=qwen2.5:14b to use it.
-MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+# Annotation models in order of preference. Measured on five real turns,
+# same prompt, same machine:
+#
+#   qwen2.5:14b   6.2 s/turn   5/5 verbatim + clean   3 of 3 fs/sc tags
+#   qwen2.5:7b    3.0 s/turn   4/5                    1 of 3
+#   qwen3:8b     30.8 s/turn   5/5                    3 of 3
+#
+# 14b is twice the cost of 7b and gets the tagging right; qwen3 is a
+# reasoning model and spends ten times as long to reach the same answer, so
+# it is not worth it here. The best one installed is used automatically.
+PREFERRED_MODELS = [
+    "qwen2.5:14b-instruct-q4_K_M",
+    "qwen2.5:14b",
+    "qwen2.5:7b-instruct-q4_K_M",
+    "qwen2.5:7b",
+]
+
+
+def pick_model():
+    override = os.environ.get("OLLAMA_MODEL")
+    if override:
+        return override
+    try:
+        import requests
+        have = {m["name"] for m in
+                requests.get("http://localhost:11434/api/tags",
+                             timeout=2).json().get("models", [])}
+        for name in PREFERRED_MODELS:
+            if name in have:
+                return name
+    except Exception:
+        pass
+    return PREFERRED_MODELS[-1]
+
+
+MODEL = pick_model()
 URL = "http://localhost:11434/api/chat"
 
 SYSTEM = """You annotate call transcripts. Apply these rules exactly.
@@ -307,6 +339,43 @@ def leaked(text):
     return any(p.lower() in low for p in LEAKED)
 
 
+BATCH = int(os.environ.get("ANNOTATE_BATCH", "8"))
+
+
+def annotate_batch(turns_slice):
+    """Annotate several turns in one call.
+
+    One call per turn spent most of its time re-reading the same 900-token
+    rulebook: 14b took about 14 s a turn that way, which is 25 minutes on a
+    nine-minute call. Eight turns per call amortises the prompt and gives the
+    model the surrounding dialogue, which it needs for [pressure] and for
+    corrections that refer back.
+
+    Returns a list the same length as the input, or raises - every turn is
+    checked against its own input afterwards, and a batch that comes back the
+    wrong shape falls back to one-at-a-time.
+    """
+    numbered = "\n".join(f"[{i}] {t['speaker']}: {t['text']}"
+                          for i, t in enumerate(turns_slice))
+    prompt = ("Annotate each numbered turn below. Return JSON:\n"
+              '{"turns": [{"n": 0, "as_spoken": "...", "clean": "...", '
+              '"flags": []}, ...]}\n'
+              "One entry per input turn, same order, same n.\n\n" + numbered)
+    r = requests.post(URL, json={
+        "model": MODEL,
+        "messages": [{"role": "system", "content": SYSTEM},
+                     {"role": "user", "content": prompt}],
+        "stream": False, "format": "json",
+        "options": {"temperature": 0.1, "num_ctx": 8192},
+    }, timeout=600)
+    r.raise_for_status()
+    got = json.loads(r.json()["message"]["content"]).get("turns")
+    if not isinstance(got, list) or len(got) != len(turns_slice):
+        raise ValueError(f"expected {len(turns_slice)} turns, got "
+                         f"{len(got) if isinstance(got, list) else 'none'}")
+    return got
+
+
 def annotate(turn_text, speaker, history, extra=""):
     prompt = (f"Previous turns for context:\n{history}\n\n"
               f"Annotate this {speaker} turn:\n{turn_text}")
@@ -424,6 +493,23 @@ if __name__ == "__main__":
     turns = json.load(open(wd / "merged_turns.json"))
     out, history, halted = [], "", None
 
+    # One batched pass first. Anything it gets wrong - a short batch, a turn
+    # whose words came back altered - simply isn't used, and that turn is
+    # redone on its own below.
+    batched = {}
+    if not fast and BATCH > 1:
+        todo = [(i, t) for i, t in enumerate(turns)
+                if not t.get("lang_certain") and not card_with_cvv(t["text"])]
+        for k in range(0, len(todo), BATCH):
+            chunk = todo[k:k + BATCH]
+            try:
+                for (idx, _), a in zip(chunk, annotate_batch([t for _, t in chunk])):
+                    batched[idx] = a
+            except Exception as e:                   # noqa: BLE001
+                print(f"  batch {k // BATCH + 1} fell back to one at a time: {e}",
+                      flush=True)
+        print(f"  batched {len(batched)}/{len(todo)} turns", flush=True)
+
     for i, t in enumerate(turns, 1):
         if card_with_cvv(t["text"]):
             halted = (f"HALT at turn {i} ({t['speaker']}): a full card number with "
@@ -467,10 +553,13 @@ if __name__ == "__main__":
                 print(f"  turn {i}/{len(turns)}", flush=True)
             continue
 
-        try:
-            a = annotate(t["text"], t["speaker"], history[-600:])
-        except Exception as e:
-            a = {"as_spoken": t["text"], "clean": "", "flags": [f"llm_error: {e}"]}
+        a = batched.get(i - 1)
+        if a is None:
+            try:
+                a = annotate(t["text"], t["speaker"], history[-600:])
+            except Exception as e:
+                a = {"as_spoken": t["text"], "clean": "",
+                     "flags": [f"llm_error: {e}"]}
 
         a.setdefault("as_spoken", t["text"])
         a.setdefault("clean", "")
@@ -568,6 +657,6 @@ if __name__ == "__main__":
 
     json.dump({"turns": out, "halted": halted},
               open(wd / "annotated.json", "w"), indent=2)
-    print(f"stage6: {len(out)} turns annotated" + (f" | {halted}" if halted else ""))
+    print(f"stage6: {len(out)} turns annotated with {MODEL}" + (f" | {halted}" if halted else ""))
     if halted:
         sys.exit(3)

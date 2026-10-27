@@ -190,14 +190,6 @@ PAGE = """<!doctype html>
        is not English but cannot reliably say which language it is.</p>
   </div>
   <div class="row">
-    <label for="hw">Names and terms to expect <span class="mut">(optional)</span></label>
-    <input id="hw" type="text" name="hotwords" style="width:100%;padding:10px;
-      border:1px solid var(--line);border-radius:8px;background:var(--bg);
-      color:var(--fg)" placeholder="CT PNS, sinus, ENT, Bangalore, Madhusudan">
-    <p class="mut">Comma-separated. Seeds the speech model with words it
-       otherwise mishears on a phone line - clinic names, drugs, places.</p>
-  </div>
-  <div class="row">
     <label><input type="checkbox" name="fast" value="1" style="width:auto"
       {% if not ollama %}checked disabled{% endif %}>
       Fast mode</label>
@@ -279,9 +271,8 @@ def upload():
     # Belt and braces: without Ollama the LLM pass cannot run, whatever the
     # form said.
     fast = request.form.get("fast") == "1" or not ollama_up()
-    hotwords = (request.form.get("hotwords") or "").strip()[:500]
     threading.Thread(target=run_job,
-                     args=(job_id, dest, name, language, second, fast, hotwords),
+                     args=(job_id, dest, name, language, second, fast, ""),
                      daemon=True).start()
     return redirect(url_for("status", job_id=job_id))
 
