@@ -57,7 +57,97 @@ FLAGS - add any that apply, for human review, never asserted as fact:
   possible_hesitation, possible_sarcasm, possible_mispron,
   possible_pressure, possible_handover
 
+EXAMPLES - follow these exactly.
+
+IN:  It clears on the 12th. No, sorry, the 14th.
+OUT: {"as_spoken": "It clears on the <sc>12th</sc>. No, sorry, the 14th.",
+      "clean": "It clears on the 14th.", "flags": []}
+
+IN:  Machine, not machine. The guy operating the machine is the wrong person.
+OUT: {"as_spoken": "<sc>Machine</sc>, not machine. The guy operating the machine is the wrong person.",
+      "clean": "The guy operating the machine is the wrong person.", "flags": []}
+
+IN:  Sure, it's ninety fourteen, so nine zero one four.
+OUT: {"as_spoken": "Sure, it's ninety fourteen, so nine zero one four.",
+      "clean": "Sure, it's 9014.", "flags": []}
+      (NOT a correction - the same value restated for clarity.)
+
+IN:  Uh, I'd like to pay the full amount [pause: 0.5s] from my account.
+OUT: {"as_spoken": "Uh, I'd like to pay the full amount [pause: 0.5s] from my account.",
+      "clean": "I'd like to pay the full amount from my account.", "flags": []}
+
 Output the JSON object and nothing else."""
+
+
+# Two kinds of false start have no judgement in them at all, and a 7B model
+# was finding neither. They are matched here instead, the same way pauses and
+# PII are: an immediate repeat of the same word, and a word broken off and
+# restarted. Anything subtler stays with the model.
+_TAGGED = re.compile(r"<[^>]*>|\[[^\]]*\]")
+
+
+def _bare(tok):
+    return re.sub(r"[^\w']", "", tok).lower()
+
+
+# A whole tagged span, so matching never reaches inside one. Without this a
+# repeat inside an <sc> span produced "<sc> <fs>I</fs> I </sc>" - nested and
+# invalid.
+_SPAN = re.compile(r"<(\w[^>\s]*)[^>]*>.*?</\1>|<[^>]*>|\[[^\]]*\]", re.S)
+
+
+def mark_false_starts(text):
+    """Wrap immediate repeats and broken words in <fs>, outside other tags."""
+    if not text or "<fs>" in text:
+        return text
+    # process only the stretches that carry no tags
+    out, last = "", 0
+    for m in _SPAN.finditer(text):
+        out += _mark_free(text[last:m.start()]) + m.group(0)
+        last = m.end()
+    return out + _mark_free(text[last:])
+
+
+def _mark_free(text):
+    if not text.strip():
+        return text
+    lead = " " if text[:1] == " " else ""
+    trail = " " if text[-1:] == " " and text.strip() else ""
+    parts, out = text.split(), []
+    i = 0
+    while i < len(parts):
+        tok = parts[i]
+        if _TAGGED.search(tok) or not _bare(tok):
+            out.append(tok)
+            i += 1
+            continue
+
+        # "I I I wanted" -> "<fs>I I</fs> I wanted": every copy but the last.
+        # A copy that ends a sentence is left alone - "Hello. Hello." is
+        # someone checking whether the line is live, not a dropped restart.
+        j = i
+        if not tok.rstrip().endswith((".", "!", "?")):
+            while (j + 1 < len(parts) and _bare(parts[j + 1]) == _bare(tok)
+                   and not _TAGGED.search(parts[j + 1])
+                   and not parts[j].rstrip().endswith((".", "!", "?"))):
+                j += 1
+        if j > i:
+            out.append("<fs>" + " ".join(parts[i:j]) + "</fs>")
+            out.append(parts[j])
+            i = j + 1
+            continue
+
+        # "resched- reschedule": a word cut off, then said in full
+        if tok.endswith("-") and i + 1 < len(parts):
+            stem = _bare(tok)
+            if len(stem) >= 3 and _bare(parts[i + 1]).startswith(stem):
+                out.append(f"<fs>{tok}</fs>")
+                i += 1
+                continue
+
+        out.append(tok)
+        i += 1
+    return lead + " ".join(out) + trail
 
 
 FILLER = re.compile(r"\b(um|uh|hmm|ah|er)\b", re.I)
@@ -81,6 +171,13 @@ def is_backchannel(text):
     words = [w.strip(".,!?").lower() for w in bare.split()]
     words = [w for w in words if w]
     return 0 < len(words) <= 3 and all(w in BACKCHANNELS for w in words)
+
+
+def words_only(text):
+    """The bare word sequence, with every tag and all punctuation removed."""
+    text = re.sub(r"<[^>]*>", " ", str(text))
+    text = re.sub(r"\[[^\]]*\]", " ", text)
+    return re.sub(r"[^\w]+", " ", text).lower().split()
 
 
 def digits_invented(as_spoken, clean):
@@ -316,7 +413,7 @@ if __name__ == "__main__":
             continue
 
         if fast:
-            text, added = regex_pii(t["text"], history[-300:])
+            text, added = regex_pii(mark_false_starts(t["text"]), history[-300:])
             text, _ = tag_entities(text)
             if t.get("interrupt"):
                 text = "[interrupt] " + text
@@ -344,6 +441,15 @@ if __name__ == "__main__":
         # whose clean line was emptied by the backchannel rule, and a digit the
         # model changed. Both are silent errors a reviewer could easily miss.
         problems = []
+        # The words belong to the transcription, not to the model. Its only
+        # job on the as-spoken line is to add tags around them. It was seen
+        # rewriting "Brooks" to "Broog" and "9-0-1-4" to "90114", which turns
+        # a transcript into a paraphrase - and on a name or a card number
+        # that is the one error the guidelines call unacceptable.
+        if words_only(a["as_spoken"]) != words_only(t["text"]):
+            problems.append("AS_SPOKEN must contain exactly the same words as "
+                            "the input, in the same order. Add tags around "
+                            "them; never change, add or drop a word.")
         # Measured markers belong to the pipeline, not the model. It has been
         # seen to drop a [pause: 0.7s] and put an invented [unclear] in its
         # place, which turns a measurement into a fabrication.
@@ -375,6 +481,11 @@ if __name__ == "__main__":
                     flags = list(b.get("flags") or [])
             except Exception:
                 pass
+            if words_only(a["as_spoken"]) != words_only(t["text"]):
+                # Still rewritten after a correction: keep the transcription's
+                # own words and only the tags we can place ourselves.
+                a["as_spoken"] = mark_false_starts(t["text"])
+                flags.append("as_spoken_rewritten_CHECK")
             if sorted(re.findall(r"\[pause: [\d.]+s\]", str(a["as_spoken"]))) != sorted(want_pauses):
                 flags.append("pause_markers_altered_CHECK")
             if "[unclear" in str(a["as_spoken"]) and "[unclear" not in t["text"]:
@@ -386,6 +497,7 @@ if __name__ == "__main__":
         ctx = history[-300:]
         a["as_spoken"], added = regex_pii(str(a["as_spoken"]), ctx)
         a["clean"], added2 = regex_pii(str(a["clean"]), ctx)
+        a["as_spoken"] = mark_false_starts(str(a["as_spoken"]))
         for place in find_locations(a["as_spoken"]):
             a["as_spoken"], _ = _wrap(a["as_spoken"], place, "LOCATION")
             a["clean"], _ = _wrap(a["clean"], place, "LOCATION")

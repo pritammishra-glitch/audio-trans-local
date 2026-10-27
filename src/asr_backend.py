@@ -18,6 +18,27 @@ SR = 16000
 MODEL_MLX = "mlx-community/whisper-large-v3-turbo"
 MODEL_FW = "large-v3-turbo"
 
+# Whisper's fallback ladder re-decodes a segment at rising temperature when it
+# fails the quality thresholds. Which setting is right depends on the audio,
+# and both directions were measured on real files:
+#
+#   Narrowband telephone audio (8 kHz): without the ladder a failed segment is
+#   simply dropped, and words go missing.
+#   Clean wideband audio: with the ladder, segments that would have decoded
+#   fine get re-rolled at temperature and come back worse - "9014" became
+#   "90114" and "Brooks" became "Broog" on a file that was previously exact.
+#
+# So the ladder is used only where it helps. stage 1 decides from the source
+# sample rate.
+TEMPERATURES_ROBUST = (0.0, 0.2, 0.4, 0.6, 0.8, 1.0)
+TEMPERATURES_EXACT = 0.0
+COMPRESSION_RATIO_THRESHOLD = 2.4   # above this the text is repetitive
+LOGPROB_THRESHOLD = -1.0            # below this the decode is not trusted
+NO_SPEECH_THRESHOLD = 0.6
+
+# Domain words whisper mishears on telephone audio. Seeded as a decoding hint.
+HOTWORDS = os.environ.get("ASR_HOTWORDS", "")
+
 _model = None       # the loaded backend model, cached per process
 _backend = None
 
@@ -57,13 +78,23 @@ def _mlx_model():
     return _model
 
 
-def transcribe_words(audio, language=None):
-    """-> (list of {word, start, end}, detected language code)."""
+def transcribe_words(audio, language=None, robust=False):
+    """-> (list of {word, start, end}, detected language code).
+
+    `robust` turns on the temperature fallback ladder, for audio poor enough
+    that a dropped segment is the bigger risk than a re-rolled one.
+    """
+    temps = TEMPERATURES_ROBUST if robust else TEMPERATURES_EXACT
     if backend() == "mlx":
         import mlx_whisper
         res = mlx_whisper.transcribe(
             audio, path_or_hf_repo=MODEL_MLX, word_timestamps=True,
-            temperature=0.0, condition_on_previous_text=False,
+            temperature=temps,
+            compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
+            logprob_threshold=LOGPROB_THRESHOLD,
+            no_speech_threshold=NO_SPEECH_THRESHOLD,
+            condition_on_previous_text=False,
+            initial_prompt=HOTWORDS or None,
             language=language)
         words = []
         for seg in res["segments"]:
@@ -76,8 +107,16 @@ def transcribe_words(audio, language=None):
         return words, res.get("language")
 
     segments, info = _fw_model().transcribe(
-        audio, language=language, word_timestamps=True, temperature=0.0,
-        condition_on_previous_text=False)
+        audio, language=language, word_timestamps=True,
+        temperature=temps,
+        compression_ratio_threshold=COMPRESSION_RATIO_THRESHOLD,
+        log_prob_threshold=LOGPROB_THRESHOLD,
+        no_speech_threshold=NO_SPEECH_THRESHOLD,
+        condition_on_previous_text=False,
+        hotwords=HOTWORDS or None,
+        # Silero VAD trims the dead air before decoding. On a call with long
+        # silences and a ringback tone that is where whisper drifts.
+        vad_filter=True)
     words = []
     for seg in segments:
         for w in (seg.words or []):
@@ -95,11 +134,11 @@ def transcribe_text(audio, language=None):
         import mlx_whisper
         res = mlx_whisper.transcribe(
             audio, path_or_hf_repo=MODEL_MLX, language=language,
-            temperature=0.0, condition_on_previous_text=False)
+            temperature=TEMPERATURES_ROBUST, condition_on_previous_text=False)
         return (res.get("text") or "").strip()
 
     segments, _ = _fw_model().transcribe(
-        audio, language=language, temperature=0.0,
+        audio, language=language, temperature=TEMPERATURES_ROBUST,
         condition_on_previous_text=False)
     return " ".join(s.text.strip() for s in segments).strip()
 

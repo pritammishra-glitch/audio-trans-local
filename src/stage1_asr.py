@@ -25,11 +25,17 @@ def read16k(path):
 
 
 def run_asr(workdir: pathlib.Path, language=None):
+    # Narrowband telephone audio needs whisper's retry ladder; clean wideband
+    # audio is made worse by it. 8 kHz is the line between the two.
+    src_sr = sf.info(workdir / "original.wav").samplerate
+    robust = src_sr <= 8000
+
     per_channel = [workdir / f"ch{c}_16k.wav" for c in (0, 1)]
     if all(p.exists() for p in per_channel):
         words, lang = [], None
         for ch, path in enumerate(per_channel):
-            got, detected = asr_backend.transcribe_words(read16k(path), language)
+            got, detected = asr_backend.transcribe_words(read16k(path), language,
+                                                         robust=robust)
             lang = lang or detected
             for w in got:
                 w["channel"] = ch
@@ -39,14 +45,16 @@ def run_asr(workdir: pathlib.Path, language=None):
         source = "per-channel"
     else:
         words, lang = asr_backend.transcribe_words(
-            read16k(workdir / "mono16k.wav"), language)
+            read16k(workdir / "mono16k.wav"), language, robust=robust)
         source = "mono mix"
 
     (workdir / "asr.json").write_text(json.dumps(
         {"words": words, "language": lang or "en", "source": source,
-         "engine": asr_backend.backend()}, indent=2))
+         "engine": asr_backend.backend(), "source_sr": src_sr,
+         "decode": "robust" if robust else "exact"}, indent=2))
     print(f"stage1: {len(words)} words, language={lang}, from {source} "
-          f"({asr_backend.backend()})")
+          f"({asr_backend.backend()}, {src_sr} Hz, "
+          f"{'robust' if robust else 'exact'} decode)")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,46 @@ ev = json.load(open(wd / "events.json"))
 spk = json.load(open(wd / "speakers.json"))
 meta = json.load(open(wd / "speakers_meta.json"))
 lang = json.load(open(wd / "asr.json")).get("language", "en")
+loose_path = wd / "standalone_events.json"
+loose = json.load(open(loose_path)) if loose_path.exists() else []
+
+
+def noise_prefix(t):
+    """Noise tags for a turn, de-duplicated and ordered after [interrupt].
+
+    Several censoring beeps inside one turn produced "[noise: beeps]
+    [noise: beeps]"; the guidelines want a repeated steady sound tagged once.
+    And the spec says the interrupter's line *starts* with [interrupt], so
+    that tag goes in front of any noise.
+    """
+    seen, tags = set(), []
+    for e in t.get("events", []):
+        if e.get("confirmed") and e["tag"] not in seen:
+            seen.add(e["tag"])
+            tags.append(f"[noise: {e['tag']}]")
+    return " ".join(tags)
+
+
+def with_tags(t):
+    body = t["as_spoken"]
+    lead = ""
+    if body.startswith("[interrupt]"):
+        lead, body = "[interrupt]", body[len("[interrupt]"):].lstrip()
+    return " ".join(x for x in (lead, noise_prefix(t), body) if x)
+
+
+def interludes():
+    """Silences and between-turn noises, as events on a shared timeline.
+
+    A ringback tone before the first word belongs to no turn, so it used to
+    vanish. Here it gets its own line, the same way a silence does.
+    """
+    out = [{"t": s["start"], "dur": s["dur"], "text": f"[silence: {s['dur']}s]"}
+           for s in ac["silences"]]
+    out += [{"t": e["t"], "dur": e.get("dur", 0),
+             "text": f"[noise: {e['tag']}]"}
+            for e in loose if e.get("confirmed")]
+    return sorted(out, key=lambda x: x["t"])
 
 
 def ts_ms(sec):
@@ -56,16 +96,19 @@ def upper_tags(text):
 # ---------------------------------------------------------------- delivery
 lines, emitted = [], set()
 for t in turns:
-    for s in ac["silences"]:
-        if s["start"] < t["start"] and s["start"] not in emitted:
-            end = s["start"] + s["dur"]
-            lines.append(f"[{ts_ms(s['start'])} - {ts_ms(end)}] [silence: {s['dur']}s]")
-            emitted.add(s["start"])
-    noise = " ".join(f"[noise: {e['tag']}]" for e in t.get("events", [])
-                     if e.get("confirmed"))
-    text = upper_tags((noise + " " + t["as_spoken"]).strip())
+    for ev_ in interludes():
+        if ev_["t"] < t["start"] and ev_["t"] not in emitted:
+            end = ev_["t"] + ev_["dur"]
+            lines.append(f"[{ts_ms(ev_['t'])} - {ts_ms(end)}] {ev_['text']}")
+            emitted.add(ev_["t"])
     lines.append(f"[{ts_ms(t['start'])} - {ts_ms(t['end'])}] "
-                 f"Speaker {letters[t['speaker']]}: {text}")
+                 f"Speaker {letters[t['speaker']]}: {upper_tags(with_tags(t))}")
+for ev_ in interludes():
+    if ev_["t"] not in emitted:
+        end = ev_["t"] + ev_["dur"]
+        lines.append(f"[{ts_ms(ev_['t'])} - {ts_ms(end)}] {ev_['text']}")
+        emitted.add(ev_["t"])
+
 (wd / "transcript.txt").write_text("\n".join(lines) + "\n")
 
 # ------------------------------------------------------------------ review
@@ -88,15 +131,13 @@ rev.append("")
 
 emitted = set()
 for t in turns:
-    for s in ac["silences"]:
-        if s["start"] < t["start"] and s["start"] not in emitted:
-            rev.append(f"{ts_short(s['start'])} [silence: {s['dur']}s]")
+    for ev_ in interludes():
+        if ev_["t"] < t["start"] and ev_["t"] not in emitted:
+            rev.append(f"{ts_short(ev_['t'])} {ev_['text']}")
             rev.append("")
-            emitted.add(s["start"])
-    noise = " ".join(f"[noise: {e['tag']}]" for e in t.get("events", [])
-                     if e.get("confirmed"))
+            emitted.add(ev_["t"])
     rev.append(f"{ts_short(t['start'])}  Speaker {letters[t['speaker']]} ({t['speaker']})")
-    rev.append(f"  AS SPOKEN: {(noise + ' ' + t['as_spoken']).strip()}")
+    rev.append(f"  AS SPOKEN: {with_tags(t)}")
     rev.append(f"  CLEAN:     {t['clean']}")
     if t.get("flags"):
         rev.append(f"  >> REVIEW: {', '.join(t['flags'])}")

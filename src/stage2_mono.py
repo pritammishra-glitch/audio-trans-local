@@ -13,19 +13,30 @@ call.
 import json, sys, pathlib
 import numpy as np, soundfile as sf
 from scipy.fftpack import dct
-from scipy.cluster.vq import kmeans2
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import pdist
 
 SR = 16000
 WIN, HOP = 0.025, 0.010
 N_MEL, N_MFCC = 26, 13
-SEG_GAP = 0.45      # a gap this long between words starts a new segment
-# Segments are cut finely so clustering has clean material, but consecutive
-# segments from the same speaker are then rejoined across a gap of up to
-# MERGE_GAP. Without this a turn can never contain a pause, because every gap
-# over 0.45 s would end the turn - and stage 3 would report silences where the
-# spec wants [pause: N.Ns].
-MERGE_GAP = 2.0
-MIN_SEG = 0.35      # segments shorter than this are too thin to cluster on
+# Segment finely for clustering, then rejoin. A segment that spans a speaker
+# change poisons both clusters, so the cut is eager: any gap of 0.25 s, and
+# never longer than MAX_SEG even without one.
+SEG_GAP = 0.25
+MAX_SEG = 6.0
+MIN_SEG = 0.30      # shorter than this is too thin to fingerprint
+
+# Consecutive same-speaker segments rejoin across a gap up to MERGE_GAP, so a
+# turn can still contain a [pause]. At 2.0 s this was swallowing short replies
+# from the other person into the wrong turn; 1.0 s still covers an in-turn
+# pause while leaving room for a quick answer.
+MERGE_GAP = 1.0
+
+# A mono recording has no channels to overlap, so a true cut-in cannot be
+# seen. What can be seen is a speaker change with no gap at all, which is what
+# cutting in sounds like once the voices are separated. It is a proxy, so
+# every one is flagged rather than asserted silently.
+INTERRUPT_GAP = 0.06
 
 
 def mel_filters(n_fft, sr, n_mel):
@@ -88,7 +99,8 @@ def segments_from_words(words):
     """Group words into stretches that are very likely one speaker."""
     segs, cur = [], None
     for w in words:
-        if cur and w["start"] - cur["end"] <= SEG_GAP:
+        if (cur and w["start"] - cur["end"] <= SEG_GAP
+                and w["end"] - cur["start"] <= MAX_SEG):
             cur["end"] = w["end"]
         else:
             if cur:
@@ -100,12 +112,23 @@ def segments_from_words(words):
 
 
 def describe(audio, sr, seg):
+    """A speaker fingerprint for one segment.
+
+    Coefficient 0 is dropped - it tracks loudness, not voice - and the rest
+    are cepstral-mean-normalised, which is the standard way to cancel the
+    channel (handset, line) so what remains is closer to the speaker. Deltas
+    add how the voice moves, not just where it sits.
+    """
     x = audio[int(seg["start"] * sr): int(seg["end"] * sr)].astype(np.float64)
     m = mfcc(x, sr)
-    if len(m) == 0:
+    if len(m) < 3:
         return None
+    m = m[:, 1:]                       # drop the energy coefficient
+    m = m - m.mean(axis=0, keepdims=True)   # per-segment CMVN
+    d = np.diff(m, axis=0)
     f0 = f0_median(x, sr)
-    return np.concatenate([m.mean(axis=0), m.std(axis=0), [f0 / 100.0]])
+    return np.concatenate([m.mean(axis=0), m.std(axis=0),
+                           d.std(axis=0), [f0 / 100.0]])
 
 
 if __name__ == "__main__":
@@ -132,7 +155,12 @@ if __name__ == "__main__":
 
     X = np.vstack(feats)
     X = (X - X.mean(axis=0)) / (X.std(axis=0) + 1e-9)
-    centroid, label = kmeans2(X, 2, minit="++", seed=0)
+    # Agglomerative clustering on cosine distance, which is what diarization
+    # systems use: k-means assumes two equal round clusters, and on a call
+    # where one person talks twice as much as the other that assumption is
+    # wrong - it splits the talkative speaker in half.
+    link = linkage(pdist(X, metric="cosine"), method="average")
+    label = fcluster(link, t=2, criterion="maxclust") - 1
 
     # Whoever speaks first is usually the agent on an inbound call. This is the
     # guide's heuristic and the reviewer is told to check it.
@@ -152,6 +180,17 @@ if __name__ == "__main__":
     if cur:
         turns.append(cur)
 
+    # Zero-gap speaker changes -> [interrupt] candidates. The window is given
+    # a little width so stage 7 can match the incoming turn against it.
+    overlaps = []
+    for a, b in zip(turns, turns[1:]):
+        gap = b["start"] - a["end"]
+        if a["speaker"] != b["speaker"] and 0 <= gap <= INTERRUPT_GAP:
+            overlaps.append({"speaker": f"{a['speaker']}|{b['speaker']}",
+                             "start": round(a["end"] - 0.05, 2),
+                             "end": round(b["start"] + 0.05, 2),
+                             "proxy": True})
+
     sizes = {r: sum(1 for l in label if role[l] == r) for r in ("AGENT", "CUSTOMER")}
     flags = ["FLAG: mono recording - speaker labels come from clustering, not "
              "channels. Check who is AGENT and who is CUSTOMER."]
@@ -159,8 +198,15 @@ if __name__ == "__main__":
         flags.append("FLAG: one speaker holds under 10% of segments - the split "
                      "may be wrong, or there may be only one speaker")
 
-    json.dump({"turns": turns, "overlaps": [], "flags": flags,
-               "method": "mfcc+f0 k-means (pyannote not installed)"},
+    if overlaps:
+        flags.append(f"FLAG: {len(overlaps)} [interrupt] tags come from "
+                     f"zero-gap speaker changes, not from heard overlap - "
+                     f"check each one")
+
+    json.dump({"turns": turns, "overlaps": overlaps, "flags": flags,
+               "method": "cmvn-mfcc+delta+f0, agglomerative cosine "
+                         "(pyannote not installed)"},
               open(wd / "speakers.json", "w"), indent=2)
     print(f"stage2-mono: {len(turns)} turns from {len(kept)} segments, "
-          f"AGENT {sizes['AGENT']} / CUSTOMER {sizes['CUSTOMER']}")
+          f"AGENT {sizes['AGENT']} / CUSTOMER {sizes['CUSTOMER']}, "
+          f"{len(overlaps)} interrupt candidates")

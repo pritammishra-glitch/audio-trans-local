@@ -93,8 +93,13 @@ def packet_drops(x, sr, word_spans):
             dur = (j - i + 2) * FRAME
             flat, peak_hz = tonality(f[i], sr)
             if flat < TONAL_FLATNESS:
+                # A tone this pure is not a judgement call - the frames repeat
+                # sample for sample and the spectrum sits in one bin. The
+                # guidelines' rule is "only tag a sound you can clearly hear",
+                # and this one is unmistakable, so it is asserted.
                 tones.append({"t": round((i - 1) * FRAME, 1), "dur": round(dur, 2),
-                              "tag": "beeps", "confirmed": False,
+                              "tag": "beeps", "confirmed": True,
+                              "hz": round(peak_hz),
                               "why": f"steady {peak_hz:.0f} Hz tone for {dur:.1f}s "
                                      f"- ringback, hold tone or beep"})
             elif mid_word((i - 1) * FRAME, (j + 1) * FRAME):
